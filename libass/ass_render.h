@@ -204,6 +204,9 @@ typedef struct {
     
     /** Pointer to the source event */
     ASS_Event *event;
+    
+    // UTF-8 clean text for this event
+    char *clean_text;
 } CharacterBoxData;
 
 /**

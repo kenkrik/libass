@@ -19,84 +19,8 @@
 #include "ass_render.h"
 #include "ass_utils.h"
 
-/**
- * \brief Helper to strip ASS formatting tags from text
- * 
- * Creates a plain text version of ASS dialogue text by removing
- * all override tags like {\tag} and drawing commands.
- * 
- * \param text Source text with ASS formatting
- * \return Newly allocated plain text string, or NULL on error
- */
-static char* strip_ass_tags(const char *text)
-{
-    if (!text)
-        return NULL;
-    
-    size_t len = strlen(text);
-    char *result = malloc(len + 1);
-    if (!result)
-        return NULL;
-    
-    const char *src = text;
-    char *dst = result;
-    int brace_level = 0;
-    
-    while (*src) {
-        if (*src == '{') {
-            brace_level++;
-            src++;
-        } else if (*src == '}') {
-            if (brace_level > 0)
-                brace_level--;
-            src++;
-        } else if (brace_level == 0) {
-            // Outside of tags, copy character
-            *dst++ = *src++;
-        } else {
-            // Inside tags, skip
-            src++;
-        }
-    }
-    
-    *dst = '\0';
-    return result;
-}
 
-/**
- * \brief Get UTF-8 byte length of a character
- */
-static int utf8_char_length(const char *str)
-{
-    unsigned char c = (unsigned char)*str;
-    
-    if (c < 0x80)
-        return 1;
-    else if ((c & 0xE0) == 0xC0)
-        return 2;
-    else if ((c & 0xF0) == 0xE0)
-        return 3;
-    else if ((c & 0xF8) == 0xF0)
-        return 4;
-    else
-        return 1; // Invalid, but don't crash
-}
 
-/**
- * \brief Convert character index to byte offset in UTF-8 string
- */
-static int char_index_to_byte_offset(const char *str, int char_index)
-{
-    int byte_offset = 0;
-    int char_count = 0;
-    
-    while (str[byte_offset] && char_count < char_index) {
-        byte_offset += utf8_char_length(str + byte_offset);
-        char_count++;
-    }
-    
-    return byte_offset;
-}
 
 /**
  * Public API Implementation
@@ -174,6 +98,7 @@ AssCharacterBox* ass_get_current_fragment_boxes(
     return boxes;
 }
 
+
 char* ass_get_dialogue_plaintext(
     ASS_Renderer *render,
     int line_id)
@@ -183,17 +108,21 @@ char* ass_get_dialogue_plaintext(
     
     ASS_Track *track = render->track;
 
-    // FIX: line_id is now the array index.
-    // Bounds check the index directly.
-    if (line_id < 0 || line_id >= track->n_events) {
+    if (line_id < 0 || line_id >= track->n_events)
         return NULL;
-    }
 
     ASS_Event *target_event = &track->events[line_id];
     
-    if (!target_event->Text)
-        return NULL;
+    // Find the clean text from char_boxes storage
+    CharacterBoxStorage *storage = &render->char_boxes;
     
-    // Strip ASS formatting tags and return plain text
-    return strip_ass_tags(target_event->Text);
+    for (size_t i = 0; i < storage->count; i++) {
+        if (storage->boxes[i].event == target_event && storage->boxes[i].clean_text) {
+            // Found it! Return a copy
+            return strdup(storage->boxes[i].clean_text);
+        }
+    }
+    
+    // Fallback: event not rendered or no boxes
+    return NULL;
 }

@@ -91,7 +91,17 @@ static void clear_character_box_storage(CharacterBoxStorage *storage)
  */
 static void free_character_box_storage(CharacterBoxStorage *storage)
 {
-    free(storage->boxes);
+    if (storage->boxes) {
+        // Free unique clean_text strings
+        const char *last_text = NULL;
+        for (size_t i = 0; i < storage->count; i++) {
+            if (storage->boxes[i].clean_text != last_text) {
+                free(storage->boxes[i].clean_text);
+                last_text = storage->boxes[i].clean_text;
+            }
+        }
+        free(storage->boxes);
+    }
     storage->boxes = NULL;
     storage->count = 0;
     storage->capacity = 0;
@@ -100,11 +110,13 @@ static void free_character_box_storage(CharacterBoxStorage *storage)
 /**
  * \brief Add a character box to storage
  */
+
 static bool add_character_box(CharacterBoxStorage *storage,
                               int text_start, int text_end,
                               const ASS_Rect *bbox, 
                               const AssBoxPoint *quad,
-                              ASS_Event *event)
+                              ASS_Event *event,
+                              const char *clean_text)  // NEW parameter
 {
     if (storage->count >= storage->capacity) {
         size_t new_capacity = storage->capacity * 2;
@@ -122,11 +134,19 @@ static bool add_character_box(CharacterBoxStorage *storage,
     box->bbox = *bbox;
     box->event = event;
     
-    // Store rotated corners
     box->c1 = quad[0];
     box->c2 = quad[1];
     box->c3 = quad[2];
     box->c4 = quad[3];
+    
+    // Store clean text (or reference to it)
+    // Only store once per unique text (dedup by pointer comparison)
+    if (storage->count == 0 || storage->boxes[storage->count - 1].clean_text != clean_text) {
+        box->clean_text = (char *)clean_text;
+    } else {
+        // Reuse the same pointer for same event
+        box->clean_text = storage->boxes[storage->count - 1].clean_text;
+    }
     
     storage->count++;
     return true;
@@ -2759,6 +2779,39 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
     FriBidiStrIndex *cmap = ass_shaper_get_reorder_map(state->shaper);
     if (!cmap)
         return;
+
+    // Convert text_info->event_text (UTF-32) to UTF-8
+    char *clean_text_utf8 = NULL;
+    if (text_info->length > 0) {
+        // Allocate maximum possible size (4 bytes per UTF-32 char + null terminator)
+        size_t max_size = text_info->length * 4 + 1;
+        clean_text_utf8 = malloc(max_size);
+        if (!clean_text_utf8)
+            return;
+        
+        char *out = clean_text_utf8;
+        for (int i = 0; i < text_info->length; i++) {
+            FriBidiChar c = text_info->event_text[i];
+            
+            // Convert UTF-32 to UTF-8
+            if (c < 0x80) {
+                *out++ = (char)c;
+            } else if (c < 0x800) {
+                *out++ = (char)(0xC0 | (c >> 6));
+                *out++ = (char)(0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                *out++ = (char)(0xE0 | (c >> 12));
+                *out++ = (char)(0x80 | ((c >> 6) & 0x3F));
+                *out++ = (char)(0x80 | (c & 0x3F));
+            } else if (c < 0x110000) {
+                *out++ = (char)(0xF0 | (c >> 18));
+                *out++ = (char)(0x80 | ((c >> 12) & 0x3F));
+                *out++ = (char)(0x80 | ((c >> 6) & 0x3F));
+                *out++ = (char)(0x80 | (c & 0x3F));
+            }
+        }
+        *out = '\0';
+    }
     
     bool *processed = calloc(text_info->length, sizeof(bool));
     if (!processed)
@@ -2849,9 +2902,14 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
         final_bbox.y_min = FFMIN(FFMIN(quad[0].y, quad[1].y), FFMIN(quad[2].y, quad[3].y));
         final_bbox.y_max = FFMAX(FFMAX(quad[0].y, quad[1].y), FFMAX(quad[2].y, quad[3].y));
         
-        add_character_box(&render_priv->char_boxes,
-                          cluster_start, cluster_end,
-                          &final_bbox, quad, event);
+        // Pass the clean_text to add_character_box
+        if (!add_character_box(&render_priv->char_boxes,
+                              cluster_start, cluster_end,
+                              &final_bbox, quad, event, clean_text_utf8)) {
+            free(clean_text_utf8);
+            free(processed);
+            return;
+        }
     }
     
     free(processed);
