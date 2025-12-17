@@ -49,6 +49,9 @@
 #define PARSED_FADE (1<<0)
 #define PARSED_A    (1<<1)
 
+
+
+
 typedef struct {
     ASS_Image result;
     CompositeHashValue *source;
@@ -179,6 +182,44 @@ typedef struct glyph_info {
     // next glyph in this cluster
     struct glyph_info *next;
 } GlyphInfo;
+
+/**
+ * \brief Character-to-text mapping information
+ * 
+ * Tracks the relationship between a rendered glyph cluster and
+ * the original source text indices.
+ */
+typedef struct {
+    /** Start byte offset in unformatted text */
+    int text_start;
+    
+    /** End byte offset in unformatted text (exclusive) */
+    int text_end;
+    
+    /** Character bounding box in 26.6 fixed-point */
+    ASS_Rect bbox;
+    
+    /** Pointer to the source event */
+    ASS_Event *event;
+} CharacterBoxData;
+
+/**
+ * \brief Storage for character box data during rendering
+ * 
+ * This structure maintains the mapping between rendered characters
+ * and their source text positions for hit-testing purposes.
+ */
+typedef struct {
+    /** Array of character box data */
+    CharacterBoxData *boxes;
+    
+    /** Number of boxes currently used */
+    size_t count;
+    
+    /** Maximum number of boxes allocated */
+    size_t capacity;
+} CharacterBoxStorage;
+
 
 typedef struct {
     double asc, desc;
@@ -335,6 +376,7 @@ struct ass_renderer {
 
     RenderContext state;
     CacheStore cache;
+    CharacterBoxStorage char_boxes;  // Character box data for hit-testing
 
     BitmapEngine engine;
 

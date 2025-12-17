@@ -48,6 +48,82 @@
 #define BLUR_PRECISION (1.0 / 256)  // blur error as fraction of full input range
 
 
+static inline bool is_harfbuzz_ignorable(unsigned symbol) {
+    switch (symbol >> 8) {
+        case 0x00: return symbol == 0x00AD;
+        case 0x03: return symbol == 0x034F;
+        case 0x06: return symbol == 0x061C;
+        case 0x17: return symbol >= 0x17B4 && symbol <= 0x17B5;
+        case 0x18: return symbol >= 0x180B && symbol <= 0x180E;
+        case 0x20: return (symbol >= 0x200B && symbol <= 0x200F) ||
+                          (symbol >= 0x202A && symbol <= 0x202E) ||
+                          (symbol >= 0x2060 && symbol <= 0x206F);
+        case 0xFE: return (symbol >= 0xFE00 && symbol <= 0xFE0F) ||
+                          symbol == 0xFEFF;
+        case 0xFF: return symbol >= 0xFFF0 && symbol <= 0xFFF8;
+        case 0x1D1: return symbol >= 0x1D173 && symbol <= 0x1D17A;
+        default: return symbol >= 0xE0000 && symbol <= 0xE0FFF;
+    }
+}
+
+/**
+ * \brief Initialize character box storage
+ */
+static bool init_character_box_storage(CharacterBoxStorage *storage)
+{
+    storage->capacity = 256; // Initial capacity
+    storage->count = 0;
+    storage->boxes = calloc(storage->capacity, sizeof(CharacterBoxData));
+    return storage->boxes != NULL;
+}
+
+/**
+ * \brief Clear character box storage (keep allocation)
+ */
+static void clear_character_box_storage(CharacterBoxStorage *storage)
+{
+    storage->count = 0;
+    // Keep the allocation for reuse
+}
+
+/**
+ * \brief Free character box storage
+ */
+static void free_character_box_storage(CharacterBoxStorage *storage)
+{
+    free(storage->boxes);
+    storage->boxes = NULL;
+    storage->count = 0;
+    storage->capacity = 0;
+}
+
+/**
+ * \brief Add a character box to storage
+ */
+static bool add_character_box(CharacterBoxStorage *storage,
+                              int text_start, int text_end,
+                              const ASS_Rect *bbox, ASS_Event *event)
+{
+    if (storage->count >= storage->capacity) {
+        size_t new_capacity = storage->capacity * 2;
+        CharacterBoxData *new_boxes = realloc(storage->boxes,
+                                              new_capacity * sizeof(CharacterBoxData));
+        if (!new_boxes)
+            return false;
+        storage->boxes = new_boxes;
+        storage->capacity = new_capacity;
+    }
+    
+    CharacterBoxData *box = &storage->boxes[storage->count];
+    box->text_start = text_start;
+    box->text_end = text_end;
+    box->bbox = *bbox;
+    box->event = event;
+    
+    storage->count++;
+    return true;
+}
+
 static bool text_info_init(TextInfo* text_info)
 {
     text_info->max_bitmaps = MAX_BITMAPS_INITIAL;
@@ -153,6 +229,9 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
     if (!render_context_init(&priv->state, priv))
         goto fail;
 
+    if (!init_character_box_storage(&priv->char_boxes))
+        goto fail;
+
     priv->user_override_style.Name = "OverrideStyle"; // name insignificant
 
     priv->settings.font_size_coeff = 1.;
@@ -200,6 +279,8 @@ void ass_renderer_done(ASS_Renderer *render_priv)
 
     free(render_priv->user_override_style.FontName);
 
+    free_character_box_storage(&render_priv->char_boxes);
+    
     free(render_priv);
 }
 
@@ -2631,6 +2712,103 @@ static void render_and_combine_glyphs(RenderContext *state,
     text_info->n_bitmaps = nb_bitmaps;
 }
 
+
+/**
+ * \brief Collect character box data from TextInfo
+ * 
+ * This function extracts bounding box information for each character
+ * cluster in the rendered text, mapping it back to source text indices.
+ * It handles the complex glyph-to-character relationships created by
+ * ligatures, combining marks, and bidi reordering.
+ * 
+ * \param state Render context
+ * \param event Source subtitle event
+ */
+static void collect_character_boxes(RenderContext *state, ASS_Event *event)
+{
+    ASS_Renderer *render_priv = state->renderer;
+    TextInfo *text_info = &state->text_info;
+    
+    if (!text_info->length)
+        return;
+    
+    // Get the visual-to-logical mapping from the shaper
+    FriBidiStrIndex *cmap = ass_shaper_get_reorder_map(state->shaper);
+    if (!cmap)
+        return;
+    
+    // Track which logical indices we've already processed
+    bool *processed = calloc(text_info->length, sizeof(bool));
+    if (!processed)
+        return;
+    
+    // Iterate through glyphs in visual order
+    for (int visual_idx = 0; visual_idx < text_info->length; visual_idx++) {
+        int logical_idx = cmap[visual_idx];
+        
+        if (processed[logical_idx])
+            continue;
+        
+        GlyphInfo *info = &text_info->glyphs[logical_idx];
+        
+        // Skip invisible characters
+        if (info->skip || is_harfbuzz_ignorable(info->symbol))
+            continue;
+        
+        // Calculate bounding box in script coordinates (26.6 fixed-point)
+        ASS_Rect bbox;
+        bbox.x_min = info->pos.x + info->bbox.x_min;
+        bbox.y_min = info->pos.y + info->bbox.y_min;
+        bbox.x_max = info->pos.x + info->bbox.x_max;
+        bbox.y_max = info->pos.y + info->bbox.y_max;
+        
+        // Find the range of logical indices for this cluster
+        int cluster_start = logical_idx;
+        int cluster_end = logical_idx + 1;
+        
+        // Extend cluster to include all glyphs with same position
+        // (handles ligatures and combining marks)
+        while (cluster_end < text_info->length) {
+            GlyphInfo *next = &text_info->glyphs[cluster_end];
+            if (next->starts_new_run || next->linebreak)
+                break;
+            
+            // Check if this glyph is part of the same cluster
+            bool same_cluster = (next->pos.x == info->pos.x &&
+                                next->pos.y == info->pos.y);
+            
+            if (!same_cluster)
+                break;
+            
+            // Extend bounding box
+            bbox.x_min = FFMIN(bbox.x_min, next->pos.x + next->bbox.x_min);
+            bbox.y_min = FFMIN(bbox.y_min, next->pos.y + next->bbox.y_min);
+            bbox.x_max = FFMAX(bbox.x_max, next->pos.x + next->bbox.x_max);
+            bbox.y_max = FFMAX(bbox.y_max, next->pos.y + next->bbox.y_max);
+            
+            cluster_end++;
+        }
+        
+        // Mark all glyphs in this cluster as processed
+        for (int i = cluster_start; i < cluster_end; i++) {
+            processed[i] = true;
+        }
+        
+        // Map logical indices to source text indices
+        // The text_info->event_text contains the original text with
+        // all formatting tags stripped out
+        int text_start = cluster_start;
+        int text_end = cluster_end;
+        
+        // Store the character box
+        add_character_box(&render_priv->char_boxes,
+                         text_start, text_end,
+                         &bbox, event);
+    }
+    
+    free(processed);
+}
+
 static inline void rectangle_combine(ASS_Rect *rect, const Bitmap *bm, ASS_Vector pos)
 {
     pos.x += bm->left;
@@ -3031,6 +3209,8 @@ ass_render_event(RenderContext *state, ASS_Event *event,
     event_images->shift_direction = (valign == VALIGN_SUB) ? -1 : 1;
     event_images->event = event;
     event_images->imgs = render_text(state);
+    
+    collect_character_boxes(state, event);
 
     if (state->border_style == 4)
         add_background(state, event_images);
@@ -3090,6 +3270,8 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
     render_priv->time = now;
 
     ass_lazy_track_init(render_priv->library, render_priv->track);
+    
+    clear_character_box_storage(&render_priv->char_boxes);
 
     if (render_priv->library->num_fontdata != render_priv->num_emfonts) {
         assert(render_priv->library->num_fontdata > render_priv->num_emfonts);
@@ -3098,6 +3280,7 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
     }
 
     setup_shaper(render_priv->state.shaper, render_priv);
+
 
     // PAR correction
     double par = render_priv->settings.par;
