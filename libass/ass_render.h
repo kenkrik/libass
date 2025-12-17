@@ -39,6 +39,7 @@
 #include "ass_drawing.h"
 #include "ass_bitmap.h"
 #include "ass_rasterizer.h"
+#include "ass_hittest.h"
 
 #define GLYPH_CACHE_MAX 10000
 #define MEGABYTE (1024 * 1024)
@@ -185,8 +186,7 @@ typedef struct glyph_info {
 
 /**
  * \brief Character-to-text mapping information
- * 
- * Tracks the relationship between a rendered glyph cluster and
+ * * Tracks the relationship between a rendered glyph cluster and
  * the original source text indices.
  */
 typedef struct {
@@ -198,6 +198,9 @@ typedef struct {
     
     /** Character bounding box in 26.6 fixed-point */
     ASS_Rect bbox;
+
+    /** Rotated corners in 26.6 fixed-point */
+    AssBoxPoint c1, c2, c3, c4;
     
     /** Pointer to the source event */
     ASS_Event *event;
@@ -205,8 +208,7 @@ typedef struct {
 
 /**
  * \brief Storage for character box data during rendering
- * 
- * This structure maintains the mapping between rendered characters
+ * * This structure maintains the mapping between rendered characters
  * and their source text positions for hit-testing purposes.
  */
 typedef struct {

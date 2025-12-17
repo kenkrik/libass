@@ -102,7 +102,9 @@ static void free_character_box_storage(CharacterBoxStorage *storage)
  */
 static bool add_character_box(CharacterBoxStorage *storage,
                               int text_start, int text_end,
-                              const ASS_Rect *bbox, ASS_Event *event)
+                              const ASS_Rect *bbox, 
+                              const AssBoxPoint *quad,
+                              ASS_Event *event)
 {
     if (storage->count >= storage->capacity) {
         size_t new_capacity = storage->capacity * 2;
@@ -119,6 +121,12 @@ static bool add_character_box(CharacterBoxStorage *storage,
     box->text_end = text_end;
     box->bbox = *bbox;
     box->event = event;
+    
+    // Store rotated corners
+    box->c1 = quad[0];
+    box->c2 = quad[1];
+    box->c3 = quad[2];
+    box->c4 = quad[3];
     
     storage->count++;
     return true;
@@ -2714,14 +2722,30 @@ static void render_and_combine_glyphs(RenderContext *state,
 
 
 /**
+ * \brief Helper to transform a point using the layout matrix
+ */
+static void transform_point(double m[3][3], double x, double y, AssBoxPoint *out)
+{
+    double z = m[2][0] * x + m[2][1] * y + m[2][2];
+    if (fabs(z) < 0.0001) z = 1.0;
+    
+    double tx = (m[0][0] * x + m[0][1] * y + m[0][2]) / z;
+    double ty = (m[1][0] * x + m[1][1] * y + m[1][2]) / z;
+    
+    // FIX: The matrix 'm' already outputs coordinates in 26.6 format.
+    // Do NOT use double_to_d6 here, or you multiply by 64 twice.
+    // Just round to the nearest integer.
+    out->x = (int32_t)lrint(tx);
+    out->y = (int32_t)lrint(ty);
+}
+
+/**
  * \brief Collect character box data from TextInfo
- * 
- * This function extracts bounding box information for each character
+ * * This function extracts bounding box information for each character
  * cluster in the rendered text, mapping it back to source text indices.
  * It handles the complex glyph-to-character relationships created by
  * ligatures, combining marks, and bidi reordering.
- * 
- * \param state Render context
+ * * \param state Render context
  * \param event Source subtitle event
  */
 static void collect_character_boxes(RenderContext *state, ASS_Event *event)
@@ -2732,17 +2756,14 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
     if (!text_info->length)
         return;
     
-    // Get the visual-to-logical mapping from the shaper
     FriBidiStrIndex *cmap = ass_shaper_get_reorder_map(state->shaper);
     if (!cmap)
         return;
     
-    // Track which logical indices we've already processed
     bool *processed = calloc(text_info->length, sizeof(bool));
     if (!processed)
         return;
     
-    // Iterate through glyphs in visual order
     for (int visual_idx = 0; visual_idx < text_info->length; visual_idx++) {
         int logical_idx = cmap[visual_idx];
         
@@ -2751,59 +2772,77 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
         
         GlyphInfo *info = &text_info->glyphs[logical_idx];
         
-        // Skip invisible characters
         if (info->skip || is_harfbuzz_ignorable(info->symbol))
             continue;
         
-        // Calculate bounding box in script coordinates (26.6 fixed-point)
-        ASS_Rect bbox;
-        bbox.x_min = info->pos.x + info->bbox.x_min;
-        bbox.y_min = info->pos.y + info->bbox.y_min;
-        bbox.x_max = info->pos.x + info->bbox.x_max;
-        bbox.y_max = info->pos.y + info->bbox.y_max;
-        
-        // Find the range of logical indices for this cluster
         int cluster_start = logical_idx;
         int cluster_end = logical_idx + 1;
         
-        // Extend cluster to include all glyphs with same position
-        // (handles ligatures and combining marks)
+        // Use the raw font-unit bounding box from the outline
+        // (If outline is missing, fallback to zero)
+        ASS_Rect raw_cbox = {0, 0, 0, 0};
+        if (info->outline) {
+            raw_cbox = info->outline->cbox;
+        }
+
+        // Extend cluster
         while (cluster_end < text_info->length) {
             GlyphInfo *next = &text_info->glyphs[cluster_end];
             if (next->starts_new_run || next->linebreak)
                 break;
             
-            // Check if this glyph is part of the same cluster
             bool same_cluster = (next->pos.x == info->pos.x &&
-                                next->pos.y == info->pos.y);
+                                 next->pos.y == info->pos.y);
             
             if (!same_cluster)
                 break;
             
-            // Extend bounding box
-            bbox.x_min = FFMIN(bbox.x_min, next->pos.x + next->bbox.x_min);
-            bbox.y_min = FFMIN(bbox.y_min, next->pos.y + next->bbox.y_min);
-            bbox.x_max = FFMAX(bbox.x_max, next->pos.x + next->bbox.x_max);
-            bbox.y_max = FFMAX(bbox.y_max, next->pos.y + next->bbox.y_max);
+            // Union the RAW cboxes of the cluster glyphs
+            if (next->outline) {
+                if (raw_cbox.x_min == 0 && raw_cbox.x_max == 0) {
+                    raw_cbox = next->outline->cbox;
+                } else {
+                    raw_cbox.x_min = FFMIN(raw_cbox.x_min, next->outline->cbox.x_min);
+                    raw_cbox.y_min = FFMIN(raw_cbox.y_min, next->outline->cbox.y_min);
+                    raw_cbox.x_max = FFMAX(raw_cbox.x_max, next->outline->cbox.x_max);
+                    raw_cbox.y_max = FFMAX(raw_cbox.y_max, next->outline->cbox.y_max);
+                }
+            }
             
             cluster_end++;
         }
         
-        // Mark all glyphs in this cluster as processed
         for (int i = cluster_start; i < cluster_end; i++) {
             processed[i] = true;
         }
+
+        double m[3][3];
+        calc_transform_matrix(state, info, m);
+
+        AssBoxPoint quad[4];
         
-        // Map logical indices to source text indices
-        // The text_info->event_text contains the original text with
-        // all formatting tags stripped out
-        int text_start = cluster_start;
-        int text_end = cluster_end;
+        // FIX: Use the raw cbox coordinates (Font Units) as input to the matrix.
+        // The matrix handles the scaling to pixels.
+        double x1 = (double)raw_cbox.x_min;
+        double y1 = (double)raw_cbox.y_min;
+        double x2 = (double)raw_cbox.x_max;
+        double y2 = (double)raw_cbox.y_max;
+
+        transform_point(m, x1, y1, &quad[0]); // Top-Left
+        transform_point(m, x2, y1, &quad[1]); // Top-Right
+        transform_point(m, x2, y2, &quad[2]); // Bottom-Right
+        transform_point(m, x1, y2, &quad[3]); // Bottom-Left
+
+        // Calculate AABB for backward compatibility
+        ASS_Rect final_bbox;
+        final_bbox.x_min = FFMIN(FFMIN(quad[0].x, quad[1].x), FFMIN(quad[2].x, quad[3].x));
+        final_bbox.x_max = FFMAX(FFMAX(quad[0].x, quad[1].x), FFMAX(quad[2].x, quad[3].x));
+        final_bbox.y_min = FFMIN(FFMIN(quad[0].y, quad[1].y), FFMIN(quad[2].y, quad[3].y));
+        final_bbox.y_max = FFMAX(FFMAX(quad[0].y, quad[1].y), FFMAX(quad[2].y, quad[3].y));
         
-        // Store the character box
         add_character_box(&render_priv->char_boxes,
-                         text_start, text_end,
-                         &bbox, event);
+                          cluster_start, cluster_end,
+                          &final_bbox, quad, event);
     }
     
     free(processed);

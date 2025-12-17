@@ -149,6 +149,12 @@ AssCharacterBox* ass_get_current_fragment_boxes(
         dst->y = src->bbox.y_min;
         dst->w = src->bbox.x_max - src->bbox.x_min;
         dst->h = src->bbox.y_max - src->bbox.y_min;
+
+        // Copy rotated vertices
+        dst->top_left = src->c1;
+        dst->top_right = src->c2;
+        dst->bottom_right = src->c3;
+        dst->bottom_left = src->c4;
         
         // FIX: Calculate array index instead of casting pointer to int
         // Pointer arithmetic: (EventPtr - BasePtr) = Index
