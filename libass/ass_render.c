@@ -2778,14 +2778,13 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
         int cluster_start = logical_idx;
         int cluster_end = logical_idx + 1;
         
-        // Use the raw font-unit bounding box from the outline
-        // (If outline is missing, fallback to zero)
+        // 1. Get the Raw Control Box (in Font Units)
         ASS_Rect raw_cbox = {0, 0, 0, 0};
         if (info->outline) {
             raw_cbox = info->outline->cbox;
         }
 
-        // Extend cluster
+        // 2. Extend cluster (Ligatures/Combining marks)
         while (cluster_end < text_info->length) {
             GlyphInfo *next = &text_info->glyphs[cluster_end];
             if (next->starts_new_run || next->linebreak)
@@ -2797,7 +2796,6 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
             if (!same_cluster)
                 break;
             
-            // Union the RAW cboxes of the cluster glyphs
             if (next->outline) {
                 if (raw_cbox.x_min == 0 && raw_cbox.x_max == 0) {
                     raw_cbox = next->outline->cbox;
@@ -2808,7 +2806,6 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
                     raw_cbox.y_max = FFMAX(raw_cbox.y_max, next->outline->cbox.y_max);
                 }
             }
-            
             cluster_end++;
         }
         
@@ -2816,13 +2813,25 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
             processed[i] = true;
         }
 
-        double m[3][3];
-        calc_transform_matrix(state, info, m);
+        // 3. Calculate the Full Transformation Matrix
+        // We must replicate the logic from get_bitmap_glyph to handle Scale & Offset correctly.
+        double m1[3][3], m[3][3];
+        const ASS_Transform *tr = &info->transform;
 
+        // A. Base Matrix (Rotation, Position, Shear)
+        calc_transform_matrix(state, info, m1);
+
+        // B. Apply Glyph Specific Scale & Offset (Fixes Size and Alignment)
+        for (int i = 0; i < 3; i++) {
+            m[i][0] = m1[i][0] * tr->scale.x;
+            m[i][1] = m1[i][1] * tr->scale.y;
+            m[i][2] = m1[i][0] * tr->offset.x + m1[i][1] * tr->offset.y + m1[i][2];
+        }
+
+        // 4. Transform the 4 Corners
         AssBoxPoint quad[4];
         
-        // FIX: Use the raw cbox coordinates (Font Units) as input to the matrix.
-        // The matrix handles the scaling to pixels.
+        // Use raw cbox (Font Units). The matrix 'm' handles the scaling to pixels.
         double x1 = (double)raw_cbox.x_min;
         double y1 = (double)raw_cbox.y_min;
         double x2 = (double)raw_cbox.x_max;
@@ -2833,7 +2842,7 @@ static void collect_character_boxes(RenderContext *state, ASS_Event *event)
         transform_point(m, x2, y2, &quad[2]); // Bottom-Right
         transform_point(m, x1, y2, &quad[3]); // Bottom-Left
 
-        // Calculate AABB for backward compatibility
+        // 5. Calculate AABB for API compatibility
         ASS_Rect final_bbox;
         final_bbox.x_min = FFMIN(FFMIN(quad[0].x, quad[1].x), FFMIN(quad[2].x, quad[3].x));
         final_bbox.x_max = FFMAX(FFMAX(quad[0].x, quad[1].x), FFMAX(quad[2].x, quad[3].x));
