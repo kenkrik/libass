@@ -114,7 +114,6 @@ AssCharacterBox* ass_get_current_fragment_boxes(
     }
     
     // Ensure we have up-to-date rendering data
-    // We don't actually need the images, just the internal state
     int detect_change;
     ASS_Track *track = render->track;
     
@@ -151,8 +150,14 @@ AssCharacterBox* ass_get_current_fragment_boxes(
         dst->w = src->bbox.x_max - src->bbox.x_min;
         dst->h = src->bbox.y_max - src->bbox.y_min;
         
-        // Use event pointer as unique line ID
-        dst->line_id = (int)(intptr_t)src->event;
+        // FIX: Calculate array index instead of casting pointer to int
+        // Pointer arithmetic: (EventPtr - BasePtr) = Index
+        if (src->event >= track->events && 
+            src->event < (track->events + track->n_events)) {
+            dst->line_id = (int)(src->event - track->events);
+        } else {
+            dst->line_id = -1; // Fallback for safety
+        }
         
         // Text indices
         dst->char_start_index = src->text_start;
@@ -171,18 +176,16 @@ char* ass_get_dialogue_plaintext(
         return NULL;
     
     ASS_Track *track = render->track;
-    ASS_Event *target_event = (ASS_Event *)(intptr_t)line_id;
-    
-    // Verify this is a valid event pointer
-    bool found = false;
-    for (int i = 0; i < track->n_events; i++) {
-        if (&track->events[i] == target_event) {
-            found = true;
-            break;
-        }
+
+    // FIX: line_id is now the array index.
+    // Bounds check the index directly.
+    if (line_id < 0 || line_id >= track->n_events) {
+        return NULL;
     }
+
+    ASS_Event *target_event = &track->events[line_id];
     
-    if (!found || !target_event->Text)
+    if (!target_event->Text)
         return NULL;
     
     // Strip ASS formatting tags and return plain text
