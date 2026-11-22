@@ -5,8 +5,14 @@ fs = import('fs')
 am_lib_file = fs.read('Makefile_library.am').split('\n')
 foreach line : am_lib_file
     args = line.split('=')
+
+    if args.length() < 2
+        continue
+    endif
+
     name = args[0].strip()
     val = args[1].strip()
+
     if name == 'LIBASS_LT_CURRENT'
         libass_lt_current = val.to_int()
     elif name == 'LIBASS_LT_REVISION'
@@ -55,6 +61,7 @@ libass_src = files(
     'ass_filesystem.c',
     'ass_font.c',
     'ass_fontselect.c',
+    'ass_hittest.c',
     'ass_library.c',
     'ass_outline.c',
     'ass_parse.c',
@@ -69,7 +76,11 @@ libass_src = files(
 
 libass_link_with = []
 
-libass_headers = files('ass.h', 'ass_types.h')
+libass_headers = files(
+    'ass.h',
+    'ass_types.h',
+    'ass_hittest.h',
+)
 
 if fontconfig
     libass_src += src_fontconfig
