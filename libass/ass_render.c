@@ -3480,6 +3480,22 @@ shift_event(ASS_Renderer *render_priv, EventImages *ei, int shift)
         cur = cur->next;
     }
     ei->top += shift;
+
+    if (shift != 0 && ei->event) {
+        int32_t shift_d6 = (int32_t)shift * 64;
+        CharacterBoxStorage *storage = &render_priv->char_boxes;
+        for (size_t i = 0; i < storage->count; i++) {
+            CharacterBoxData *box = &storage->boxes[i];
+            if (box->event == ei->event) {
+                box->bbox.y_min += shift_d6;
+                box->bbox.y_max += shift_d6;
+                box->c1.y += shift_d6;
+                box->c2.y += shift_d6;
+                box->c3.y += shift_d6;
+                box->c4.y += shift_d6;
+            }
+        }
+    }
 }
 
 // dir: 1 - move down
