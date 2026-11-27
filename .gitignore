@@ -2,6 +2,7 @@
 *.o
 *.lo
 *.la
+build/
 
 # Temporaries
 .deps
@@ -42,3 +43,6 @@ Makefile.in
 
 # Meson
 /subprojects
+
+# Mac
+.DS_Store
